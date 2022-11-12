@@ -147,7 +147,7 @@ export default abstract class AbstractClientConnection {
 
       console.log('Received Settings Request: %o', data);
 
-      const settingsBytes = data.slice(1, 20);
+      const settingsBytes = data.slice(1, 24);
 
       this.saveSettings(settingsBytes);
 
