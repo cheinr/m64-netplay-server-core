@@ -1,6 +1,6 @@
 import * as XXH from 'xxhashjs';
 
-import GameDirector from '../game-director';
+import GameDirector, { ClientInfo } from '../game-director';
 import RegistrationInfo from '../registration-info';
 
 export interface ConnectionInfo {
@@ -12,6 +12,7 @@ export interface ConnectionInfo {
 export default abstract class AbstractClientConnection {
 
   public readonly connectionInfo: { name: string; token: string };
+  public isGamepadConnected = false;
 
   protected abstract gameDirector: GameDirector | undefined;
 
@@ -28,6 +29,7 @@ export default abstract class AbstractClientConnection {
 
   protected abstract send(buffer: Buffer): void;
   public abstract sendUnreliable(buffer: ArrayBuffer): void;
+  protected abstract sendRoomControlMessage(message: string): void;
   protected abstract closeConnection(): void;
 
   public constructor(connectionInfo: ConnectionInfo,
@@ -114,6 +116,66 @@ export default abstract class AbstractClientConnection {
 
   private notifyDisconnect(registrationId: number): void {
     this.gameDirector!.disconnectPlayer(registrationId);
+  }
+
+  protected _handleClientRoomControlMessage(data: string): void {
+
+    const message = JSON.parse(data);
+
+    switch (message.type) {
+
+      case 'init':
+
+        this.clientIsReady = true;
+        this.clientReadyListeners.forEach((cb) => cb());
+        break;
+
+      case 'request-game-start':
+        this.gameDirector!.requestGameStart(this.connectionInfo);
+        break;
+
+      case 'request-game-pause':
+        this.gameDirector!.requestGamePause(this.connectionInfo);
+        break;
+
+      case 'confirm-game-paused':
+        const pauseCounts: number[] = message.payload.pauseCounts;
+
+        this.gameDirector!.confirmConnectionPaused(this.connectionInfo, pauseCounts);
+        break;
+
+      case 'request-game-resume':
+        this.gameDirector!.requestGameResume(this.connectionInfo);
+        break;
+
+      case 'reassign-client-controller': {
+        const clientId = message.payload.clientId;
+        const desiredControllerIndex = message.payload.desiredControllerIndex;
+        this.gameDirector!.reassignClientToController(this.connectionInfo, clientId, desiredControllerIndex);
+        break;
+      }
+
+      case 'set-is-local-gamepad-connected': {
+
+        const gamepadConnectedStateChanged = message.payload.isGamepadConnected !== this.isGamepadConnected;
+        this.isGamepadConnected = message.payload.isGamepadConnected;
+
+        if (gamepadConnectedStateChanged) {
+          this.gameDirector?.broadcastRoomClientInfo().catch((err) => {
+            console.error('Something went wrong while notifying players about gamepad connection state change!', err);
+          });;
+        }
+        break;
+      }
+
+      case 'ping':
+        this.sendPong(message.payload.sendTime);
+        break;
+
+      default:
+        console.error('Unknown message: %o', message);
+        break;
+    }
   }
 
   protected _handleClientReliableMessage(data: Buffer): void {
@@ -265,7 +327,7 @@ export default abstract class AbstractClientConnection {
       localBufferSize);
 
     if (maybeInputBuffer === null) {
-
+      // We requested an input that has been deleted. The client can no longer continue and should be closed.
       this.closeConnection();
       this.notifyDisconnect(registrationId);
 
@@ -333,5 +395,81 @@ export default abstract class AbstractClientConnection {
   protected signalClientReady(): void {
     this.clientIsReady = true;
     this.clientReadyListeners.forEach((cb) => cb());
+  }
+
+  public async sendGameStartMessage(registrationId: number): Promise<void> {
+    return this._waitForClientToBeReady().then(() => {
+
+      this.sendRoomControlMessage(JSON.stringify({
+        type: 'start-game',
+        payload: {
+          registrationId
+        }
+      }));
+    });
+  }
+
+  public async sendGamePauseMessage(pauseTargetCounts: number[]): Promise<void> {
+
+    return this._waitForClientToBeReady().then(() => {
+
+      this.sendRoomControlMessage(JSON.stringify({
+        type: 'pause-game',
+        payload: {
+          pauseTargetCounts
+        }
+      }));
+    });
+  }
+
+  public async sendGameResumeMessage(): Promise<void> {
+
+    return this._waitForClientToBeReady().then(() => {
+
+      this.sendRoomControlMessage(JSON.stringify({
+        type: 'resume-game'
+      }));
+    });
+  }
+
+  public async sendPlayerLagNotification(clientId: number, lag: number): Promise<void> {
+    return this._waitForClientToBeReady().then(() => {
+      this.sendRoomControlMessage(JSON.stringify({
+        type: 'client-lag',
+        payload: {
+          clientId,
+          lag
+        }
+      }));
+    });
+  }
+
+  public async sendRoomPlayerInfo(clients: ClientInfo[], clientPlayerIndex: number): Promise<void> {
+
+    return this._waitForClientToBeReady().then(() => {
+      try {
+        this.sendRoomControlMessage(JSON.stringify({
+          type: 'room-player-info',
+          payload: {
+            clients,
+            clientPlayerIndex
+          }
+        }));
+      } catch (err) {
+        console.error('Error while sending room players [%o] to client: ', clients, err);
+      }
+    }).catch((err) => {
+      console.error('Failed to send room player info to player: %o. Error: ', this.connectionInfo,
+        err);
+    });
+  }
+
+  private sendPong(pingTime: number): void {
+    this.sendRoomControlMessage(JSON.stringify({
+      type: 'pong',
+      payload: {
+        t: pingTime
+      }
+    }));
   }
 }
