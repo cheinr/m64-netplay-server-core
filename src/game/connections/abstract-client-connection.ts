@@ -14,7 +14,7 @@ export default abstract class AbstractClientConnection {
   public readonly connectionInfo: { name: string; token: string };
   public isGamepadConnected = false;
 
-  protected abstract gameDirector: GameDirector | undefined;
+  protected gameDirector: GameDirector | undefined;
 
   private registrationInfo: RegistrationInfo | null;
 
